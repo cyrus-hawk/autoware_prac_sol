@@ -35,42 +35,48 @@ class PurePursuitFollower:
         rospy.Subscriber('/localization/current_pose', PoseStamped, self.current_pose_callback, queue_size=1)
 
     def path_callback(self, msg):
-        # convert waypoints to shapely linestring
-        path_linestring = LineString([(w.position.x, w.position.y) for w in msg.waypoints])
-        # prepare path - creates spatial tree, making the spatial queries more efficient
-        prepare(path_linestring)
-        self.path_linstring = path_linestring
+        try:
+            # convert waypoints to shapely linestring
+            path_linestring = LineString([(w.position.x, w.position.y) for w in msg.waypoints])
+            # prepare path - creates spatial tree, making the spatial queries more efficient
+            prepare(path_linestring)
+            self.path_linstring = path_linestring
 
-        # Create a distance-to-velocity interpolator for the path
-        # collect waypoint x and y coordinates
-        waypoints_xy = np.array([(w.position.x, w.position.y) for w in msg.waypoints])
-        # Calculate distances between points
-        distances = np.cumsum(np.sqrt(np.sum(np.diff(waypoints_xy, axis=0)**2, axis=1)))
-        # add 0 distance in the beginning
-        distances = np.insert(distances, 0, 0)
-        # Extract velocity values at waypoints
-        velocities = np.array([w.speed for w in msg.waypoints])     
-        self.distance_to_velocity_interpolator = interp1d(distances, velocities, kind='linear')           
+            # Create a distance-to-velocity interpolator for the path
+            # collect waypoint x and y coordinates
+            waypoints_xy = np.array([(w.position.x, w.position.y) for w in msg.waypoints])
+            # Calculate distances between points
+            distances = np.cumsum(np.sqrt(np.sum(np.diff(waypoints_xy, axis=0)**2, axis=1)))
+            # add 0 distance in the beginning
+            distances = np.insert(distances, 0, 0)
+            # Extract velocity values at waypoints
+            velocities = np.array([w.speed for w in msg.waypoints])     
+            self.distance_to_velocity_interpolator = interp1d(distances, velocities, kind='linear', bounds_error=False, fill_value=0.0)           
+        except np.AxisError:
+            self.distance_to_velocity_interpolator = interp1d([0, 0], [0, 0], kind='linear')   
 
     def current_pose_callback(self, msg):
+        velocity = steering_angle = 0
         
-        current_pose = Point([msg.pose.position.x, msg.pose.position.y])
         try:
+            current_pose = Point([msg.pose.position.x, msg.pose.position.y])
             d_ego_from_path_start = self.path_linstring.project(current_pose)
-        except AttributeError as e:
-            pass
+       
 
         
 
-        # current heading angle
-        _, _, current_heading = euler_from_quaternion([msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w])
+            # current heading angle
+            _, _, current_heading = euler_from_quaternion([msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w])
 
-        lookahead_circle = current_pose.buffer(self.lookahead_distance)
-        intersection = self.path_linstring.intersection(lookahead_circle)
+            # lookahead_circle = current_pose.buffer(self.lookahead_distance)
+            
 
-        try:
-            coords = list(intersection.coords)
-            lookahead_point = Point(coords[-1])
+      
+            # intersection = self.path_linstring.intersection(lookahead_circle)
+
+            # coords = list(intersection.coords)
+            # lookahead_point = Point(coords[-1])
+            lookahead_point = self.path_linstring.interpolate(d_ego_from_path_start + self.lookahead_distance)
             
         
             # lookahead point heading calculation
@@ -83,13 +89,18 @@ class PurePursuitFollower:
             curvature = 2 * math.sin(heading_difference) / lookahead_distance
 
             steering_angle = math.atan(self.wheel_base * curvature)
-        except IndexError:
-            steering_angle = 0
 
-        try:
-            velocity = self.distance_to_velocity_interpolator(d_ego_from_path_start)
-        except TypeError:
-            velocity = 10
+            velocity = self.distance_to_velocity_interpolator(d_ego_from_path_start)   
+
+        except (IndexError, AttributeError):
+            steering_angle = 0
+        except (TypeError, ValueError):
+            velocity = 0
+
+        # print("lookahead_distance", lookahead_distance)
+        # print("steering angle", steering_angle)
+        # print("velocity", velocity)
+        # print("d_ego_from_path_start", d_ego_from_path_start)
 
         vehicle_cmd = VehicleCmd()
         vehicle_cmd.ctrl_cmd.steering_angle = steering_angle
